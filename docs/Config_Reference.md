@@ -2397,6 +2397,41 @@ temperature sensors that are reported via the M105 command.
 #   parameter.
 ```
 
+### [temperature_probe]
+
+Reports probe coil temperature.  Includes optional thermal drift
+calibration for eddy current based probes.   A `[temperature_probe]`
+section may be linked to a `[probe_eddy_current]` by using the same
+postfix for both sections.
+
+```
+[temperature_probe my_probe]
+#sensor_type:
+#sensor_pin:
+#min_temp:
+#max_temp:
+#   Temperature sensor configuration.
+#   See the "extruder" section for the definition of the above
+#   parameters.
+#smooth_time:
+#   A time value (in seconds) over which temperature measurements will
+#   be smoothed to reduce the impact of measurement noise. The default
+#   is 2.0 seconds.
+#gcode_id:
+#   See the "heater_generic" section for the definition of this
+#   parameter.
+#speed:
+#   The travel speed [mm/s] for xy moves during calibration.  Default
+#   is the speed defined by the probe.
+#horizontal_move_z:
+#   The z distance [mm] from the bed at which xy moves will occur
+#   during calibration. Default is 2mm.
+#resting_z:
+#   The z distance [mm] from the bed at which the tool will rest
+#   to heat the probe coil during calibration.  Default is .4mm
+
+```
+
 ## Temperature sensors
 
 Klipper includes definitions for many types of temperature sensors.
