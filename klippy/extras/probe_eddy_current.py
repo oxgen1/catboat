@@ -7,6 +7,18 @@ import math, bisect
 from klippy import mcu
 from . import ldc1612, probe, manual_probe
 
+OUT_OF_RANGE = 99.9
+TAP_NOISE_COMPENSATION = 0.8
+
+# Linear regression (a*x + b) for list of (x,y) pairs
+def simple_linear_regression(data):
+    inv_count = 1. / len(data)
+    x_avg = sum([d[0] for d in data]) * inv_count
+    y_avg = sum([d[1] for d in data]) * inv_count
+    x_var = sum([(d[0] - x_avg)**2 for d in data])
+    xy_covar = sum([(d[0] - x_avg)*(d[1] - y_avg) for d in data])
+    slope = xy_covar / x_var
+    return slope, y_avg - slope*x_avg
 
 # Tool for calibrating the sensor Z detection and applying that calibration
 class EddyCalibration:
@@ -23,6 +35,9 @@ class EddyCalibration:
                 for d in cal.split(",")
             ]
             self.load_calibration(cal)
+        # Estimate toolhead velocity to change in frequency
+        self.tap_threshold = self.tap_factor = 0.
+        self.calc_frequency_rate()
         # Probe calibrate state
         self.probe_speed = 0.0
         # Register commands
@@ -38,7 +53,32 @@ class EddyCalibration:
 
     def is_calibrated(self):
         return len(self.cal_freqs) > 2
-
+    def calc_frequency_rate(self):
+        count = len(self.cal_freqs)
+        if count < 2:
+            return
+        data = []
+        for i in range(count-1):
+            f = self.cal_freqs[i]
+            z = self.cal_zpos[i]
+            f_next = self.cal_freqs[i+1]
+            z_next = self.cal_zpos[i+1]
+            chg_freq_per_dist = -((f_next - f) / (z_next - z))
+            data.append((f, chg_freq_per_dist))
+        raw_freq_rate = simple_linear_regression(data)
+        freq_max_tap = -raw_freq_rate[1] / raw_freq_rate[0]
+        z_max_tap = self.freq_to_height(freq_max_tap)
+        # Pad rates to reduce impact of noise
+        adj_slope = raw_freq_rate[0] * TAP_NOISE_COMPENSATION
+        z_adj_tap = z_max_tap * TAP_NOISE_COMPENSATION
+        freq_adj_tap = self.height_to_freq(z_adj_tap)
+        self.tap_factor = adj_slope
+        self.tap_threshold = freq_adj_tap
+        # XXX
+        logging.info("eddy tap threshold thr=%.3f,%.3f tf=%s",
+                     self.tap_threshold,
+                     self.freq_to_height(self.tap_threshold),
+                     self.tap_factor)
     def load_calibration(self, cal):
         cal = sorted([(c[1], c[0]) for c in cal])
         self.cal_freqs = [c[0] for c in cal]
@@ -219,43 +259,27 @@ class EddyEndstopWrapper:
         self._sensor_helper = sensor_helper
         self._mcu = sensor_helper.get_mcu()
         self._calibration = calibration
-        self._z_offset = config.getfloat("z_offset", minval=0.0)
+        self._tap_height = config.getfloat('tap_height', None, minval=0.)
+        self._use_tap = self._tap_height and calibration.is_calibrated()
+        self._z_offset = config.getfloat('z_offset', minval=0.)
         self._dispatch = mcu.TriggerDispatch(self._mcu)
-        self._samples = []
-        self._is_sampling = self._start_from_home = self._need_stop = False
-        self._trigger_time = 0.0
-        self._printer.register_event_handler(
-            "klippy:mcu_identify", self._handle_mcu_identify
-        )
-
-    def _handle_mcu_identify(self):
-        kin = self._printer.lookup_object("toolhead").get_kinematics()
-        for stepper in kin.get_steppers():
-            if stepper.is_active_axis("z"):
-                self.add_stepper(stepper)
-
-    # Measurement gathering
-    def _start_measurements(self, is_home=False):
-        self._need_stop = False
-        if self._is_sampling:
+        self._trigger_time = 0.
+        self._gather = None
+        # XXX
+        self._printer.register_event_handler('toolhead:drip', self._handle_drip)
+        self._delayed_setup = 0.
+    def _handle_drip(self, print_time, move):
+        # XXX - mega hack - delayed sensor start to obtain toolhead accel_t
+        if not self._use_tap or not self._delayed_setup:
             return
-        self._is_sampling = True
-        self._start_from_home = is_home
-        self._sensor_helper.add_client(self._add_measurement)
-
-    def _stop_measurements(self, is_home=False):
-        if not self._is_sampling or (is_home and not self._start_from_home):
-            return
-        self._need_stop = True
-
-    def _add_measurement(self, msg):
-        if self._need_stop:
-            del self._samples[:]
-            self._is_sampling = self._need_stop = False
-            return False
-        self._samples.append(msg)
-        return True
-
+        pretap_freq = self._calibration.height_to_freq(self._tap_height)
+        self._sensor_helper.setup_tap(
+            self._delayed_setup, print_time + move.accel_t, pretap_freq,
+            self._dispatch.get_oid(),
+            mcu.MCU_trsync.REASON_ENDSTOP_HIT, self.REASON_SENSOR_ERROR,
+            self._calibration.tap_threshold,
+            self._calibration.tap_factor * move.cruise_v)
+        self._delayed_setup = 0.
     # Interface for MCU_endstop
     def get_mcu(self):
         return self._mcu
@@ -273,6 +297,10 @@ class EddyEndstopWrapper:
         self._start_measurements(is_home=True)
         trigger_freq = self._calibration.height_to_freq(self._z_offset)
         trigger_completion = self._dispatch.start(print_time)
+        if self._use_tap:
+            # XXX
+            self._delayed_setup = print_time
+            return trigger_completion
         self._sensor_helper.setup_home(
             print_time,
             trigger_freq,
@@ -306,7 +334,7 @@ class EddyEndstopWrapper:
         # Perform probing move
         phoming = self._printer.lookup_object("homing")
         trig_pos = phoming.probing_move(self, pos, speed)
-        if not self._trigger_time:
+        if not self._trigger_time or self._use_tap:
             return trig_pos
         # Wait for samples to arrive
         start_time = self._trigger_time + 0.050
