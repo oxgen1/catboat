@@ -17,6 +17,9 @@ SETTLETIME = 0.005
 DRIVECUR = 15
 DEGLITCH = 0x05  # 10 Mhz
 
+EMA_BASE = 16
+HOMING_AVERAGE_WEIGHT = 0.25
+
 LDC1612_MANUF_ID = 0x5449
 LDC1612_DEV_ID = 0x3055
 
@@ -109,12 +112,13 @@ class LDC1612:
                 % (oid, self.i2c.get_oid(), pin_params["pin"])
             )
         else:
-            mcu.add_config_cmd(
-                "config_ldc1612 oid=%d i2c_oid=%d" % (oid, self.i2c.get_oid())
-            )
-        mcu.add_config_cmd(
-            "query_ldc1612 oid=%d rest_ticks=0" % (oid,), on_restart=True
-        )
+            mcu.add_config_cmd("config_ldc1612 oid=%d i2c_oid=%d"
+                               % (oid, self.i2c.get_oid()))
+        factor = int((1. - HOMING_AVERAGE_WEIGHT) * EMA_BASE + 0.5)
+        mcu.add_config_cmd("ldc1612_setup_averaging oid=%d factor=%d"
+                           % (oid, factor))
+        mcu.add_config_cmd("query_ldc1612 oid=%d rest_ticks=0"
+                           % (oid,), on_restart=True)
         mcu.register_config_callback(self._build_config)
         # Bulk sample message reading
         chip_smooth = self.data_rate * BATCH_UPDATES * 2
