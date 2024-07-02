@@ -17,6 +17,9 @@ SETTLETIME = 0.005
 DRIVECUR = 15
 DEGLITCH = 0x05 # 10 Mhz
 
+EMA_BASE = 16
+HOMING_AVERAGE_WEIGHT = 0.25
+
 LDC1612_MANUF_ID = 0x5449
 LDC1612_DEV_ID = 0x3055
 
@@ -87,8 +90,21 @@ class LDC1612:
         self.oid = oid = mcu.create_oid()
         self.query_ldc1612_cmd = None
         self.ldc1612_setup_home_cmd = self.query_ldc1612_home_state_cmd = None
-        mcu.add_config_cmd("config_ldc1612 oid=%d i2c_oid=%d"
-                           % (oid, self.i2c.get_oid()))
+        if config.get('intb_pin', None) is not None:
+            ppins = config.get_printer().lookup_object("pins")
+            pin_params = ppins.lookup_pin(config.get('intb_pin'))
+            if pin_params['chip'] != mcu:
+                raise config.error("ldc1612 intb_pin must be on same mcu")
+            mcu.add_config_cmd(
+                "config_ldc1612_with_intb oid=%d i2c_oid=%d intb_pin=%s"
+                % (oid, self.i2c.get_oid(), pin_params['pin']))
+        else:
+            mcu.add_config_cmd("config_ldc1612 oid=%d i2c_oid=%d"
+                               % (oid, self.i2c.get_oid()))
+        factor = int((1. - HOMING_AVERAGE_WEIGHT) * EMA_BASE + 0.5)
+        factor = min(EMA_BASE - 1, max(0, factor))
+        mcu.add_config_cmd("ldc1612_setup_averaging oid=%d factor=%d"
+                           % (oid, factor))
         mcu.add_config_cmd("query_ldc1612 oid=%d rest_ticks=0"
                            % (oid,), on_restart=True)
         mcu.register_config_callback(self._build_config)
@@ -108,11 +124,13 @@ class LDC1612:
         cmdqueue = self.i2c.get_command_queue()
         self.query_ldc1612_cmd = self.mcu.lookup_command(
             "query_ldc1612 oid=%c rest_ticks=%u", cq=cmdqueue)
-        self.ffreader.setup_query_command("query_ldc1612_status oid=%c",
+        self.ffreader.setup_query_command("query_status_ldc1612 oid=%c",
                                           oid=self.oid, cq=cmdqueue)
         self.ldc1612_setup_home_cmd = self.mcu.lookup_command(
             "ldc1612_setup_home oid=%c clock=%u threshold=%u"
-            " trsync_oid=%c trigger_reason=%c", cq=cmdqueue)
+            " trsync_oid=%c trigger_reason=%c error_reason=%c"
+            " tap_threshold=%i tap_adjust_factor=%u tap_clock=%u"
+            " pretap_reason=%c", cq=cmdqueue)
         self.query_ldc1612_home_state_cmd = self.mcu.lookup_query_command(
             "query_ldc1612_home_state oid=%c",
             "ldc1612_home_state oid=%c homing=%c trigger_clock=%u",
@@ -129,13 +147,33 @@ class LDC1612:
     def add_client(self, cb):
         self.batch_bulk.add_client(cb)
     # Homing
-    def setup_home(self, print_time, trigger_freq, trsync_oid, reason):
+    def setup_home(self, print_time, trigger_freq,
+                   trsync_oid, hit_reason, err_reason):
         clock = self.mcu.print_time_to_clock(print_time)
         tfreq = int(trigger_freq * (1<<28) / float(LDC1612_FREQ) + 0.5)
         self.ldc1612_setup_home_cmd.send(
-            [self.oid, clock, tfreq, trsync_oid, reason])
+            [self.oid, clock, tfreq, trsync_oid, hit_reason, err_reason,
+             0, 0, 0, 0])
+    def setup_tap(self, print_time, tap_time, pretap_freq,
+                  trsync_oid, hit_reason, err_reason,
+                  tap_threshold, tap_factor):
+        clock = self.mcu.print_time_to_clock(print_time)
+        tap_clock = self.mcu.print_time_to_clock(tap_time)
+        if tap_clock - clock >= 1<<31:
+            raise self.printer.command_error(
+                "ldc1612 tap time too far in future")
+        ptfreq = int(pretap_freq * (1<<28) / float(LDC1612_FREQ) + 0.5)
+        adj_factor = tap_factor / self.data_rate
+        tapfreq = -int(tap_threshold * adj_factor * (1<<28)
+                       / float(LDC1612_FREQ) + 0.5)
+        tfactor = int(adj_factor * (1<<32) + 0.5)
+        logging.info("ptf=%f/%d tt=%f/%d tf=%f/%d", pretap_freq, ptfreq,
+                     tap_threshold, tapfreq, tap_factor, tfactor)
+        self.ldc1612_setup_home_cmd.send(
+            [self.oid, clock, ptfreq, trsync_oid, hit_reason, err_reason,
+             tapfreq, tfactor, tap_clock, err_reason + 1])
     def clear_home(self):
-        self.ldc1612_setup_home_cmd.send([self.oid, 0, 0, 0, 0])
+        self.ldc1612_setup_home_cmd.send([self.oid, 0, 0, 0, 0, 0, 0, 0, 0, 0])
         if self.mcu.is_fileoutput():
             return 0.
         params = self.query_ldc1612_home_state_cmd.send([self.oid])
