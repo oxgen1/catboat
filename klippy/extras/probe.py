@@ -307,6 +307,20 @@ class ProbeSessionHelper:
                 'samples_tolerance': samples_tolerance,
                 'samples_tolerance_retries': samples_retries,
                 'samples_result': samples_result}
+    def get_lift_speed(self, gcmd=None):
+        if gcmd is not None:
+            return gcmd.get_float("LIFT_SPEED", self.lift_speed, above=0.)
+        return self.lift_speed
+    def get_probe_speed(self, gcmd=None):
+        if gcmd is not None:
+            return gcmd.get_float("PROBE_SPEED", self.speed, above=0.)
+        return self.speed
+    def get_offsets(self):
+        return self.x_offset, self.y_offset, self.z_offset
+    def get_probe_name(self):
+        return self.name
+    def is_scanning_probe(self):
+        return getattr(self.mcu_probe, "HAS_SCANNING", False)
     def _probe(self, speed):
         toolhead = self.printer.lookup_object('toolhead')
         curtime = self.printer.get_reactor().monotonic()

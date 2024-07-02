@@ -208,6 +208,24 @@ adjustment after a tool change.  Note that a ZFADE offset does not apply
 additional z-adjustment directly, it is used to correct the `fade`
 calculation when a `gcode offset` has been applied to the Z axis.
 
+#### BED_MESH_DUMP
+`BED_MESH_DUMP [FILENAME=<name>] [<mesh_parameter>=<value>]`:
+Dumps the current mesh configuration and state in json format for
+[visualization and analysis](./Bed_Mesh.md#visualization-and-analysis).
+The `FILENAME` parameter is optional and should be a relative name, when
+not specified the file's name will be in the format of
+`klipper-bedmesh-{year}{month}{day}{hour}{minute}{second}.json`. The
+file will be saved in a location relative to the parent of
+klipper's configuration file, this is commonly at
+`~/printer_data/config` or the user's home directory.
+
+In addition, one may specify `mesh parameters` available to
+[BED_MESH_CALIBRATE](#bed_mesh_calibrate).  This will result in a dump
+containing a mesh configuration and probe points using the
+supplied parameters.   It is recommended to omit Mesh parameters
+unless it is desired to visualize the probe points and/or travel
+path before performing `BED_MESH_CALIBRATE`.
+
 ### [bed_screws]
 
 The following commands are available when the
@@ -1415,3 +1433,34 @@ command will probe the points specified in the config and then make independent
 adjustments to each Z stepper to compensate for tilt. See the PROBE command for
 details on the optional probe parameters. The optional `HORIZONTAL_MOVE_Z`
 value overrides the `horizontal_move_z` option specified in the config file.
+
+### [temperature_probe]
+
+The following commands are available when a
+[temperature_probe config section](Config_Reference.md#temperature_probe)
+is enabled.
+
+#### PROBE_DRIFT_CALIBRATE
+`PROBE_DRIFT_CALIBRATE [PROBE=<probe name>] [TARGET=<value>] [STEP=<value>]`:
+Initiates probe drift calibration for eddy current based probes.  The `TARGET`
+is a target temperature for the last sample.  When the temperature recorded
+during a sample exceeds the `TARGET` calibration will complete.  The `STEP`
+parameter sets temperature delta (in C) between samples. After a sample has
+been taken, this delta is used to schedule a call to `PROBE_DRIFT_NEXT`.  The
+default `STEP` is 2.
+
+#### PROBE_DRIFT_NEXT
+`PROBE_DRIFT_NEXT`: After calibration has started this command is run to take
+the next sample.  It is automatically scheduled to run when the delta specified
+by `STEP` has been reached, however its also possible to manually run this
+command to force a new sample.  This command is only available during
+calibration.
+
+#### PROBE_DRIFT_COMPLETE:
+`PROBE_DRIFT_COMPLETE`:  Can be used to end calibration and save the
+current result before the `TARGET` temperature is reached.  This command
+is only available during calibration.
+
+#### ABORT
+`ABORT`:  Aborts the calibration process, discarding the current results.
+This command is only available during drift calibration.

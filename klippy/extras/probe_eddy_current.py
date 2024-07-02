@@ -6,6 +6,7 @@
 import logging, math, bisect
 import mcu
 from . import ldc1612, probe, manual_probe
+from mathutil import Polynomial2d
 
 OUT_OF_RANGE = 99.9
 TAP_NOISE_COMPENSATION = 0.8
@@ -19,15 +20,18 @@ def simple_linear_regression(data):
     xy_covar = sum([(d[0] - x_avg)*(d[1] - y_avg) for d in data])
     slope = xy_covar / x_var
     return slope, y_avg - slope*x_avg
+    
 
 # Tool for calibrating the sensor Z detection and applying that calibration
 class EddyCalibration:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.name = config.get_name()
+        self.drift_comp = EddyDriftCompensation(config)
         # Current calibration data
         self.cal_freqs = []
         self.cal_zpos = []
+        self.cal_temp = config.getfloat('calibration_temp', 0)
         cal = config.get('calibrate', None)
         if cal is not None:
             cal = [list(map(float, d.strip().split(':', 1)))
@@ -78,7 +82,8 @@ class EddyCalibration:
         self.cal_zpos = [c[1] for c in cal]
     def apply_calibration(self, samples):
         for i, (samp_time, freq, dummy_z) in enumerate(samples):
-            pos = bisect.bisect(self.cal_freqs, freq)
+            adj_freq = self.drift_comp.adjust_freq(freq, self.cal_temp)
+            pos = bisect.bisect(self.cal_freqs, adj_freq)
             if pos >= len(self.cal_zpos):
                 zpos = -OUT_OF_RANGE
             elif pos == 0:
@@ -91,7 +96,7 @@ class EddyCalibration:
                 prev_zpos = self.cal_zpos[pos - 1]
                 gain = (this_zpos - prev_zpos) / (this_freq - prev_freq)
                 offset = prev_zpos - prev_freq * gain
-                zpos = freq * gain + offset
+                zpos = adj_freq * gain + offset
             samples[i] = (samp_time, freq, round(zpos, 6))
     def freq_to_height(self, freq):
         dummy_sample = [(0., freq, 0.)]
@@ -111,7 +116,8 @@ class EddyCalibration:
         prev_zpos = rev_zpos[pos - 1]
         gain = (this_freq - prev_freq) / (this_zpos - prev_zpos)
         offset = prev_freq - prev_zpos * gain
-        return height * gain + offset
+        freq = height * gain + offset
+        return self.drift_comp.lookup_freq(freq, self.cal_temp)
     def do_calibration_moves(self, move_speed):
         toolhead = self.printer.lookup_object('toolhead')
         kin = toolhead.get_kinematics()
@@ -126,6 +132,7 @@ class EddyCalibration:
             return True
         self.printer.lookup_object(self.name).add_client(handle_batch)
         toolhead.dwell(1.)
+        temp = self.drift_comp.get_temperature()
         # Move to each 40um and then each 5mm position
         samp_dist1 = 0.040
         samp_dist2 = 5.000
@@ -153,6 +160,7 @@ class EddyCalibration:
             times.append((start_query_time, end_query_time, kin_pos[2]))
         toolhead.dwell(1.0)
         toolhead.wait_moves()
+        temp = (temp + self.drift_comp.get_temperature()) / 2.
         # Finish data collection
         is_finished = True
         # Correlate query responses
@@ -168,7 +176,7 @@ class EddyCalibration:
         if len(cal) != len(times):
             raise self.printer.command_error(
                 "Failed calibration - incomplete sensor data")
-        return cal
+        return cal, temp
     def calc_freqs(self, meas):
         total_count = total_variance = 0
         positions = {}
@@ -199,7 +207,7 @@ class EddyCalibration:
         curpos[2] -= 5. - 0.050
         move(curpos, self.probe_speed)
         # Perform calibration movement and capture
-        cal = self.do_calibration_moves(self.probe_speed)
+        cal, temp = self.do_calibration_moves(self.probe_speed)
         # Calculate each sample position average and variance
         positions, std, total = self.calc_freqs(cal)
         last_freq = 0.
@@ -223,9 +231,18 @@ class EddyCalibration:
         cal_contents.pop()
         configfile = self.printer.lookup_object('configfile')
         configfile.set(self.name, 'calibrate', ''.join(cal_contents))
+        configfile.set(self.name, 'calibration_temp', "%.6f" % (temp,))
     cmd_EDDY_CALIBRATE_help = "Calibrate eddy current probe"
     def cmd_EDDY_CALIBRATE(self, gcmd):
         self.probe_speed = gcmd.get_float("PROBE_SPEED", 5., above=0.)
+        toolhead = self.printer.lookup_object('toolhead')
+        curtime = self.printer.get_reactor().monotonic()
+        if 'xy' not in toolhead.get_status(curtime)['homed_axes']:
+            raise self.printer.command_error("Must home X and Y before probe")
+        if 'z' not in toolhead.get_status(curtime)['homed_axes']:
+            pos = toolhead.get_position()
+            pos[2] = toolhead.get_status(curtime)["axis_maximum"][2]
+            toolhead.set_position(pos, homing_axes=[2])
         # Start manual probe
         manual_probe.ManualProbeHelper(self.printer, gcmd,
                                        self.post_manual_probe)
@@ -335,6 +352,7 @@ class EddyGatherSamples:
 # Helper for implementing PROBE style commands (descend until trigger)
 class EddyEndstopWrapper:
     REASON_SENSOR_ERROR = mcu.MCU_trsync.REASON_COMMS_TIMEOUT + 1
+    HAS_SCANNING = True
     def __init__(self, config, sensor_helper, calibration):
         self._printer = config.get_printer()
         self._sensor_helper = sensor_helper
@@ -484,19 +502,528 @@ class PrinterEddyProbe:
         self.printer.add_object('probe', self)
     def add_client(self, cb):
         self.sensor_helper.add_client(cb)
-    def get_probe_params(self, gcmd=None):
-        return self.probe_session.get_probe_params(gcmd)
-    def get_offsets(self):
-        return self.probe_offsets.get_offsets()
-    def get_status(self, eventtime):
-        return self.cmd_helper.get_status(eventtime)
-    def start_probe_session(self, gcmd):
-        method = gcmd.get('METHOD', 'automatic').lower()
-        if method in ('scan', 'rapid_scan'):
-            z_offset = self.get_offsets()[2]
-            return EddyScanningProbe(self.printer, self.sensor_helper,
-                                     self.calibration, z_offset, gcmd)
-        return self.probe_session.start_probe_session(gcmd)
+    def stream(self, cb):
+        return StreamingContext(self, cb)
+
+DRIFT_SAMPLE_COUNT = 9
+
+class EddyDriftCompensation:
+    def __init__(self, config):
+        self.printer = config.get_printer()
+        self.name = config.get_name()
+        self.drift_calibration = None
+        self.calibration_samples = None
+        self.dc_min_temp = config.getfloat("drift_calibration_min_temp", 0.)
+        dc = config.getlists(
+            "drift_calibration", None, seps=(',', '\n'), parser=float
+        )
+        self.min_freq = 999999999999.
+        if dc is not None:
+            for coefs in dc:
+                if len(coefs) != 3:
+                    raise config.error(
+                        "Invalid polynomial in drift calibration"
+                    )
+            self.drift_calibration = [Polynomial2d(*coefs) for coefs in dc]
+            cal = self.drift_calibration
+            self._check_calibration(cal, self.dc_min_temp, config.error)
+            low_poly = self.drift_calibration[-1]
+            self.min_freq = min([low_poly(temp) for temp in range(121)])
+            cal_str = "\n".join([repr(p) for p in cal])
+            logging.info(
+                "%s: loaded temperature drift calibration. Min Temp: %.2f,"
+                " Min Freq: %.6f\n%s"
+                % (self.name, self.dc_min_temp, self.min_freq, cal_str)
+            )
+        else:
+            logging.info(
+                "%s: No drift calibration configured, disabling temperature "
+                "compensation"
+                % (self.name,)
+            )
+        self.enabled = has_dc = self.drift_calibration is not None
+        cal_temp = config.getfloat('calibration_temp', 0)
+        if cal_temp < 1e-6 and has_dc:
+            self.enabled = False
+            logging.info(
+                "%s: No temperature saved for eddy probe calibration, "
+                "disabling temperature compensation."
+                % (self.name,)
+            )
+
+        temp_section = "temperature_probe " + self.name.split(maxsplit=1)[-1]
+        self.temp_sensor = None
+        if config.has_section(temp_section):
+            self.temp_sensor = self.printer.load_object(
+                config, temp_section
+            )
+            self.temp_sensor.register_calibration_helper(self)
+        if self.temp_sensor is None and has_dc:
+            self.enabled = False
+            logging.info(
+                "%s: Temperature Sensor [%s] not configured, "
+                "disabling temperature compensation"
+                % (self.name, temp_section)
+            )
+
+    def is_enabled(self):
+        return self.enabled
+
+    def collect_sample(self, kin_pos, tool_zero_z, speeds):
+        if self.calibration_samples is None:
+            self.calibration_samples = [[] for _ in range(DRIFT_SAMPLE_COUNT)]
+        move_times = []
+        probe_samples = [[] for _ in range(DRIFT_SAMPLE_COUNT)]
+        scanner = self.printer.lookup_object(self.name)
+        toolhead = self.printer.lookup_object("toolhead")
+        reactor = self.printer.get_reactor()
+        cur_pos = toolhead.get_position()
+        sample_temp = self.get_temperature()
+        lift_speed, probe_speed, _ = speeds
+
+        def _on_data_recd(msg):
+            data = msg["data"]
+            if not move_times:
+                return
+            idx, start_time, end_time = move_times[0]
+            for sample in data:
+                ptime = sample[0]
+                while ptime > end_time:
+                    move_times.pop(0)
+                    if not move_times:
+                        return
+                    idx, start_time, end_time = move_times[0]
+                if ptime < start_time:
+                    continue
+                probe_samples[idx].append(sample)
+        with scanner.stream(_on_data_recd):
+            for i in range(DRIFT_SAMPLE_COUNT):
+                if i == 0:
+                    # Move down to first sample location
+                    cur_pos[2] = tool_zero_z + .05
+                else:
+                    # Sample each .5mm in z
+                    cur_pos[2] += 1.
+                    toolhead.manual_move(cur_pos, lift_speed)
+                    cur_pos[2] -= .5
+                toolhead.manual_move(cur_pos, probe_speed)
+                start = toolhead.get_last_move_time() + .05
+                end = start + .1
+                move_times.append((i, start, end))
+                toolhead.dwell(.2)
+            toolhead.wait_moves()
+            sample_temp = (sample_temp + self.get_temperature()) / 2.
+            reactor.pause(reactor.monotonic() + .2)
+        for i, data in enumerate(probe_samples):
+            freqs = [d[1] for d in data]
+            zvals = [d[2] for d in data]
+            avg_freq = sum(freqs) / len(freqs)
+            avg_z = sum(zvals) / len(zvals)
+            kin_z = i * .5 + .05 + kin_pos[2]
+            logging.info(
+                "Probe Values at Temp %.2fC, Z %.4fmm: Avg Freq = %.6f, "
+                "Avg Measured Z = %.6f"
+                % (sample_temp, kin_z, avg_freq, avg_z)
+            )
+            self.calibration_samples[i].append((sample_temp, avg_freq))
+        return sample_temp
+
+    def start_calibration(self):
+        self.calibration_samples = [[] for _ in range(DRIFT_SAMPLE_COUNT)]
+
+    def finish_calibration(self, success):
+        cal_samples = self.calibration_samples
+        self.calibration_samples = None
+        if not success:
+            return
+        gcode = self.printer.lookup_object("gcode")
+        if len(cal_samples) < 3:
+            raise gcode.error(
+                "calbration error, not enough samples"
+            )
+        min_temp, _ = cal_samples[0][0]
+        polynomials = []
+        for i, coords in enumerate(cal_samples):
+            height = .05 + i * .5
+            poly = Polynomial2d.fit(coords)
+            polynomials.append(poly)
+            logging.info("Polynomial at Z=%.2f: %s" % (height, repr(poly)))
+        self._check_calibration(polynomials, min_temp)
+        coef_cfg = "\n" + "\n".join([str(p) for p in polynomials])
+        configfile = self.printer.lookup_object('configfile')
+        configfile.set(self.name, "drift_calibration", coef_cfg)
+        configfile.set(self.name, "drift_calibration_min_temp", min_temp)
+        gcode.respond_info(
+            "%s: generated %d 2D polynomials\n"
+            "The SAVE_CONFIG command will update the printer config "
+            "file and restart the printer."
+            % (self.name, len(polynomials))
+        )
+        try:
+            # Dump collected data to temporary file
+            import json
+            ctime = int(self.printer.get_reactor().monotonic())
+            tmpfname = "/tmp/eddy-probe-drift-%d.json" % (ctime)
+            out = {
+                "polynomial_coefs": [c.get_coefs() for c in polynomials],
+                "legend": ["temperature", "frequency"],
+                "data": cal_samples,
+                "start_z": .05,
+                "sample_z_dist": .5
+            }
+            with open(tmpfname, "w") as f:
+                f.write(json.dumps(out))
+        except Exception:
+            logging.exception("Failed to write %s" % (tmpfname))
+
+    def _check_calibration(self, calibration, start_temp, error=None):
+        error = error or self.printer.command_error
+        start = int(start_temp)
+        for temp in range(start, 121, 1):
+            last_freq = calibration[0](temp)
+            for i, poly in enumerate(calibration[1:]):
+                next_freq = poly(temp)
+                if next_freq >= last_freq:
+                    # invalid polynomial
+                    raise error(
+                        "%s: invalid calibration detected, curve at index "
+                        "%d overlaps previous curve at temp %dC."
+                        % (self.name, i + 1, temp)
+                    )
+                last_freq = next_freq
+
+    def adjust_freq(self, freq, dest_temp):
+        # Adjusts frequency from current temperature toward
+        # destination temperature
+        if not self.enabled or freq < self.min_freq:
+            return freq
+        cur_temp = self.temp_sensor.get_temp()[0]
+        return self._calc_freq(freq, cur_temp, dest_temp)
+
+    def lookup_freq(self, freq, origin_temp):
+        # Given a frequency and its orignal sampled temp, find the
+        # offset frequency based on the current temp
+        if not self.enabled or freq < self.min_freq:
+            return freq
+        cur_temp = self.temp_sensor.get_temp()[0]
+        return self._calc_freq(freq, origin_temp, cur_temp)
+
+    def _calc_freq(self, freq, origin_temp, dest_temp):
+        high_freq = low_freq = None
+        dc = self.drift_calibration
+        for pos, poly in enumerate(dc):
+            high_freq = low_freq
+            low_freq = poly(origin_temp)
+            if freq >= low_freq:
+                if high_freq is None:
+                    # Freqency above max calibration value
+                    return dc[0](dest_temp)
+                t = min(1., max(0., (freq - low_freq) / (high_freq - low_freq)))
+                low_tgt_freq = poly(dest_temp)
+                high_tgt_freq = dc[pos-1](dest_temp)
+                return (1 - t) * low_tgt_freq + t * high_tgt_freq
+        # Frequency below minimum, no correction
+        return freq
+
+    def get_temperature(self):
+        if self.temp_sensor is not None:
+            return self.temp_sensor.get_temp()[0]
+        return 0.
+
+class StreamingContext:
+    def __init__(self, scanning_probe, callback):
+        self.scanner = scanning_probe
+        self.callback = callback
+        self.reactor = scanning_probe.printer.get_reactor()
+        self.done_completion = None
+        self.stream_enabled = False
+
+    def __enter__(self):
+        self.stream_enabled = True
+        self.scanner.add_client(self._bulk_callback)
+
+    def __exit__(self, type=None, value=None, tb=None):
+        self.done_completion = self.reactor.completion()
+        self.stream_enabled = False
+        self.done_completion.wait()
+        self.done_completion = None
+
+    def _bulk_callback(self, msg):
+        if not self.stream_enabled:
+            if self.done_completion is not None:
+                self.done_completion.complete(None)
+            return False
+        self.callback(msg)
+        return True
+
+
+MAX_HIT_DIST = 2.
+MM_WIN_SPEED = 125
+
+class SamplingMode:
+    STANDARD = 0
+    WEIGHTED = 1
+    CENTERED = 2
+    LINEAR = 3
+
+    @staticmethod
+    def from_str(sampling_type):
+        return getattr(SamplingMode, sampling_type.upper(), 0)
+
+    def to_str(sampling_idx):
+        return {
+            val: name.lower() for name, val in SamplingMode.__dict__.items()
+            if name[0].isupper() and isinstance(val, int)
+        }.get(sampling_idx, "standard")
+
+
+class ProbeScanHelper:
+    def __init__(
+            self, printer, points, use_offsets, speed,
+            horizontal_move_z, finalize_cb
+    ):
+        self.printer = printer
+        self.points = points
+        self.probe = self.printer.lookup_object("probe")
+        self.probe_offsets = self.probe.get_offsets()
+        self.use_offsets = use_offsets
+        self.speed = speed
+        self.scan_height = horizontal_move_z
+        self.finalize_callback = finalize_cb
+        self.min_time_window = 0
+        self.max_time_window = 0
+        self.sampling_mode = SamplingMode.STANDARD
+        self.reset()
+
+    def reset(self):
+        self.samples_pending = []
+        self.lookahead_index = 0
+        self.sample_index = 0
+
+    def perform_scan(self, gcmd):
+        mode = gcmd.get("SCAN_MODE", "detailed")
+        speed = gcmd.get_float("SCAN_SPEED", self.speed)
+        default_sm = "centered" if mode == "detailed" else "standard"
+        sampling_mode = gcmd.get("SAMPLES_RESULT", default_sm)
+        self.sampling_mode = SamplingMode.from_str(sampling_mode)
+        gcmd.respond_info(
+            "Beginning %s surface scan at height %.2f, sampling mode %s..."
+            % (mode, self.scan_height, SamplingMode.to_str(self.sampling_mode))
+        )
+        while True:
+            self.reset()
+            if mode == "rapid":
+                results = self._rapid_scan(gcmd, speed)
+            else:
+                results = self._detailed_scan(gcmd, speed)
+            # There is no z_offset since the scan height is used
+            # to calculate the "probed" position
+            offsets = list(self.probe_offsets)
+            offsets[2] = 0
+            ret = self.finalize_callback(tuple(offsets), results)
+            if ret != "retry":
+                break
+
+    def _detailed_scan(self, gcmd, speed):
+        scanner = self.printer.lookup_object(self.probe.get_probe_name())
+        toolhead = self.printer.lookup_object("toolhead")
+        sample_time = gcmd.get_float("SAMPLE_TIME", .1, above=.1)
+        sample_time += .05
+        self._raise_tool(gcmd)
+        # Start sampling and go
+        reactor = self.printer.get_reactor()
+        self.min_time_window = -0.05
+        self.max_time_window = sample_time
+        with scanner.stream(self._on_bulk_data_collected):
+            for idx, pos in enumerate(self.points):
+                pos = self._apply_offsets(pos[:2])
+                toolhead.manual_move(pos, speed)
+                if idx == 0:
+                    self._move_to_scan_height(gcmd)
+                toolhead.register_lookahead_callback(self._lookahead_callback)
+                toolhead.dwell(sample_time)
+            toolhead.wait_moves()
+            reactor.pause(reactor.monotonic() + .2)
+        return self._process_batch_measurements(gcmd)
+
+    def _rapid_scan(self, gcmd, speed):
+        scanner = self.printer.lookup_object(self.probe.get_probe_name())
+        toolhead = self.printer.lookup_object("toolhead")
+        # Calculate time window around which a sample is valid.  Current
+        # assumption is anything within 2mm is usable, so:
+        # window = 2 / max_speed
+        #
+        # TODO: validate maximum speed allowed based on sample rate of probe
+        # Scale the hit distance window for speeds lower than 125mm/s.  The
+        # lower the speed the less the window shrinks.
+        scale = max(0, 1 - speed / MM_WIN_SPEED) + 1
+        hit_dist = min(MAX_HIT_DIST, scale * speed / MM_WIN_SPEED)
+        window = hit_dist / speed
+        gcmd.respond_info(
+            "Sample hit distance +/- %.4fmm, time window +/- ms %.4f"
+            % (hit_dist, window * 1000)
+        )
+        self.min_time_window = self.max_time_window = window
+        self._raise_tool(gcmd)
+        # Start sampling and go
+        reactor = self.printer.get_reactor()
+        with scanner.stream(self._on_bulk_data_collected):
+            ptgen = getattr(self.points, "iter_rapid", self._rapid_default_gen)
+            for idx, (pos, is_probe_pt) in enumerate(ptgen()):
+                pos = self._apply_offsets(pos[:2])
+                toolhead.manual_move(pos, speed)
+                if idx == 0:
+                    self._move_to_scan_height(gcmd)
+                if is_probe_pt:
+                    toolhead.register_lookahead_callback(
+                        self._lookahead_callback
+                    )
+            toolhead.wait_moves()
+            reactor.pause(reactor.monotonic() + .2)
+        return self._process_batch_measurements(gcmd)
+
+    def _rapid_default_gen(self):
+        for pt in self.points:
+            yield pt, True
+
+    def _raise_tool(self, gcmd):
+        # If the nozzle is below scan height raise the tool
+        toolhead = self.printer.lookup_object("toolhead")
+        cur_pos = toolhead.get_position()
+        if cur_pos[2] >= self.scan_height:
+            return
+        lift_speed = self.probe.get_lift_speed(gcmd)
+        cur_pos[2] = self.scan_height + .5
+        toolhead.manual_move(cur_pos, lift_speed)
+
+    def _move_to_scan_height(self, gcmd):
+        toolhead = self.printer.lookup_object("toolhead")
+        cur_pos = toolhead.get_position()
+        lift_speed = self.probe.get_lift_speed(gcmd)
+        probe_speed = self.probe.get_probe_speed(gcmd)
+        cur_pos[2] = self.scan_height + .5
+        toolhead.manual_move(cur_pos, lift_speed)
+        cur_pos[2] = self.scan_height
+        toolhead.manual_move(cur_pos, probe_speed)
+        toolhead.dwell(abs(self.min_time_window) + .01)
+
+    def _apply_offsets(self, point):
+        if self.use_offsets:
+            return [(pos - ofs) for pos, ofs in zip(point, self.probe_offsets)]
+        return point
+
+    def _lookahead_callback(self, print_time):
+        pt = self._apply_offsets(self.points[self.lookahead_index])
+        self.lookahead_index += 1
+        self.samples_pending.append((print_time, pt, []))
+
+    def _on_bulk_data_collected(self, msg):
+        idx = self.sample_index
+        if len(self.samples_pending) < idx + 1:
+            return
+        req_time, _, z_samples = self.samples_pending[idx]
+        data = msg["data"]
+        for ptime, _, z in data:
+            while ptime > req_time + self.max_time_window:
+                self.sample_index += 1
+                idx = self.sample_index
+                if len(self.samples_pending) < idx + 1:
+                    return
+                req_time, _, z_samples = self.samples_pending[idx]
+            if ptime < req_time - self.min_time_window:
+                continue
+            z_samples.append((ptime, z))
+
+    def _process_batch_measurements(self, gcmd):
+        results = []
+        if len(self.samples_pending) != len(self.points):
+            raise gcmd.error(
+                "Position sample length does not match number of points "
+                "requested, received: %d, requested %d"
+                % (len(self.samples_pending), len(self.points))
+            )
+        last_sample = (0, 0, [])
+        overlaps = set()
+        for idx, sample in enumerate(self.samples_pending):
+            # look behind for overlapping samples
+            min_smample_time = sample[0] - self.min_time_window
+            z_samples = sample[2]
+            for zs in last_sample[2]:
+                if zs in z_samples:
+                    continue
+                if zs[0] >= min_smample_time:
+                    z_samples.append(zs)
+                    overlaps.add(idx)
+            z_samples.sort(key=lambda s: s[0])
+            results.append(self._process_samples(gcmd, sample))
+            last_sample = sample
+        if overlaps:
+            logging.info("Detected %d overlapping samples" % (len(overlaps),))
+        return results
+
+    def _process_samples(self, gcmd, sample):
+        move_time, pos, z_samples = sample
+        valid_samples = []
+        for sample in z_samples:
+            if abs(sample[1]) > 99.0:
+                logging.info(
+                    "Z-sample at time %.6f for position (%.6f, %.6f) is "
+                    "invalid.  Verify that 'horizontal_move_z' not too high."
+                    % (sample[0], pos[0], pos[1])
+                )
+            else:
+                valid_samples.append(sample)
+        sample_len = len(valid_samples)
+        if sample_len == 0:
+            raise gcmd.error(
+                "No valid measurements found at coordinate : %s"
+                % (repr(pos),)
+            )
+        if self.sampling_mode == SamplingMode.CENTERED:
+            # Average middle samples
+            z_vals = sorted([s[1] for s in valid_samples])
+            discard_count = len(z_vals) // 4
+            keep_vals = z_vals[discard_count:-discard_count]
+            sample_len = len(keep_vals)
+            z_height = sum(keep_vals) / sample_len
+        elif self.sampling_mode == SamplingMode.WEIGHTED:
+            # Perform a weighted average
+            time_diffs = [abs(move_time - s[0]) for s in valid_samples]
+            max_diff = max(time_diffs)
+            # Add weight as a factor of the furthest sample
+            weights = [max_diff / diff for diff in time_diffs]
+            total_weight = sum(weights)
+            z_height = 0
+            for weight, sample in zip(weights, valid_samples):
+                factor = weight / total_weight
+                z_height += sample[1] * factor
+        elif self.sampling_mode == SamplingMode.LINEAR:
+            sample_times = [s[0] for s in valid_samples]
+            idx = bisect.bisect(sample_times, move_time)
+            if idx == 0:
+                z_height = valid_samples[0][1]
+            elif idx == sample_len:
+                z_height = valid_samples[-1][1]
+            else:
+                min_time, min_z = valid_samples[idx - 1]
+                max_time, max_z = valid_samples[idx]
+                time_diff = max_time - min_time
+                time_from_min = move_time - min_time
+                t = min(1, max(0, time_from_min / time_diff))
+                z_height = (1. - t) * min_z + t * max_z
+        else:
+            z_height = sum([s[1] for s in valid_samples]) / sample_len
+        probed_z = self.scan_height - z_height
+        atc = self.printer.lookup_object("axis_twist_compensation", None)
+        if atc is not None:
+            # perform twist compensation on the desired sample position
+            z_comp = atc.get_z_compensation_value(pos)
+            probed_z += z_comp
+        logging.info(
+            "Scan at (%.4f, %.4f) is z=%.6f, height=%.6f, sample count=%d"
+            % (pos[0], pos[1], probed_z, z_height, sample_len)
+        )
+        return [pos[0], pos[1], probed_z]
 
 def load_config_prefix(config):
     return PrinterEddyProbe(config)
