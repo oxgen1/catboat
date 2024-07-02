@@ -121,17 +121,14 @@ class BedMesh:
         self.gcode.register_command(
             'BED_MESH_OFFSET', self.cmd_BED_MESH_OFFSET,
             desc=self.cmd_BED_MESH_OFFSET_help)
-<<<<<<< HEAD
         # Register dump webhooks
         webhooks = self.printer.lookup_object('webhooks')
         webhooks.register_endpoint(
             "bed_mesh/dump_mesh", self._handle_dump_request
         )
-=======
-        self.gcode.register_command(
-            'BED_MESH_DUMP', self.cmd_BED_MESH_DUMP,
-            desc=self.cmd_BED_MESH_DUMP_help)
->>>>>>> eddy/eddy
+        # self.gcode.register_command(
+        #     'BED_MESH_DUMP', self.cmd_BED_MESH_DUMP,
+        #     desc=self.cmd_BED_MESH_DUMP_help)
         # Register transform
         gcode_move = self.printer.load_object(config, 'gcode_move')
         gcode_move.set_move_transform(self)
@@ -293,7 +290,6 @@ class BedMesh:
             gcode_move.reset_last_position()
         else:
             gcmd.respond_info("No mesh loaded to offset")
-<<<<<<< HEAD
     def _handle_dump_request(self, web_request):
         eventtime = self.printer.get_reactor().monotonic()
         prb = self.printer.lookup_object("probe", None)
@@ -301,24 +297,11 @@ class BedMesh:
         result = {"current_mesh": {}, "profiles": self.pmgr.get_profiles()}
         if self.z_mesh is not None:
             result["current_mesh"] = {
-=======
-    cmd_BED_MESH_DUMP_help = "Dump mesh data to file for analysis"
-    def cmd_BED_MESH_DUMP(self, gcmd):
-        cmd_params = gcmd.get_command_parameters()
-        fname = cmd_params.pop("FILENAME", None)
-        eventtime = self.printer.get_reactor().monotonic()
-        prb = self.printer.lookup_object("probe", None)
-        th_sts = self.printer.lookup_object("toolhead").get_status(eventtime)
-        mdmp = {"current_mesh": {}, "profiles": self.pmgr.get_profiles()}
-        if self.z_mesh is not None:
-            mdmp["current_mesh"] = {
->>>>>>> eddy/eddy
                 "name": self.z_mesh.get_profile_name(),
                 "probed_matrix": self.z_mesh.get_probed_matrix(),
                 "mesh_matrix": self.z_mesh.get_mesh_matrix(),
                 "mesh_params": self.z_mesh.get_mesh_params()
             }
-<<<<<<< HEAD
         mesh_args = web_request.get_dict("mesh_args", {})
         gcmd = None
         if mesh_args:
@@ -332,7 +315,6 @@ class BedMesh:
         result["axis_minimum"] = th_sts["axis_minimum"]
         result["axis_maximum"] = th_sts["axis_maximum"]
         web_request.send(result)
-=======
         mdmp["calibration"] = self.bmc.dump_calibration(gcmd)
         mdmp["probe_offsets"] = [0, 0, 0] if prb is None else prb.get_offsets()
         mdmp["axis_minimum"] = th_sts["axis_minimum"]
@@ -351,7 +333,6 @@ class BedMesh:
         with open(out_path, "w") as f:
             json.dump(mdmp, f, indent=2)
         gcmd.respond_info("Current mesh data dumped to %s" % (out_path,))
->>>>>>> eddy/eddy
 
 
 class ZrefMode:
@@ -368,12 +349,11 @@ class BedMeshCalibrate:
         self.radius = self.origin = None
         self.mesh_min = self.mesh_max = (0., 0.)
         self.adaptive_margin = config.getfloat('adaptive_margin', 0.0)
-<<<<<<< HEAD
         self.bedmesh = bedmesh
         self.mesh_config = collections.OrderedDict()
         self._init_mesh_config(config)
         self.probe_mgr = ProbeManager(
-            config, self.orig_config, self.probe_finalize
+            config, self.orig_config, self.probe_finalize,
         )
         try:
             self.probe_mgr.generate_points(
@@ -383,29 +363,21 @@ class BedMeshCalibrate:
         except BedMeshError as e:
             raise config.error(str(e))
         self._profile_name = "default"
-=======
         self.zero_ref_pos = zrpos = config.getfloatlist(
             "zero_reference_position", None, count=2
         )
         self.zero_reference_mode = ZrefMode.DISABLED
-        self.bedmesh = bedmesh
-        self.mesh_config = collections.OrderedDict()
-        self._init_mesh_config(config)
-        self.path_generator = PathGenerator(config, og_cfg, zrpos)
-        self._generate_points(config.error)
-        self._profile_name = "default"
-        self.probe_helper = probe.ProbePointsHelper(
-            config, self.probe_finalize, self.path_generator
-        )
-        self.probe_helper.minimum_points(3)
-        self.probe_helper.use_xy_offsets(True)
->>>>>>> eddy/eddy
+        #self.path_generator = PathGenerator(config, og_cfg, zrpos)
+        #self._generate_points(config.error)
+        #self.probe_helper = probe.ProbePointsHelper(
+        #    config, self.probe_finalize, self.path_generator
+       # )
+       # self.probe_helper.minimum_points(3)
+        #self.probe_helper.use_xy_offsets(True)
         self.gcode = self.printer.lookup_object('gcode')
         self.gcode.register_command(
             'BED_MESH_CALIBRATE', self.cmd_BED_MESH_CALIBRATE,
             desc=self.cmd_BED_MESH_CALIBRATE_help)
-<<<<<<< HEAD
-=======
     def _generate_points(self, error, probe_method="automatic"):
         x_cnt = self.mesh_config['x_count']
         y_cnt = self.mesh_config['y_count']
@@ -466,7 +438,6 @@ class BedMeshCalibrate:
             )
         except BedMeshError as e:
             raise error(str(e))
->>>>>>> eddy/eddy
     def print_generated_points(self, print_func):
         x_offset = y_offset = 0.
         probe = self.printer.lookup_object('probe', None)
@@ -486,19 +457,11 @@ class BedMeshCalibrate:
                 "bed_mesh: zero_reference_position is (%.2f, %.2f)"
                 % (zero_ref_pos[0], zero_ref_pos[1])
             )
-<<<<<<< HEAD
         substitutes = self.probe_mgr.get_substitutes()
         if substitutes:
             print_func("bed_mesh: faulty region points")
             for i, v in substitutes.items():
                 pt = points[i]
-=======
-        substitutes = self.path_generator.get_substitutes()
-        if substitutes:
-            print_func("bed_mesh: faulty region points")
-            for i, v in substitutes.items():
-                pt = self.points[i]
->>>>>>> eddy/eddy
                 print_func("%d (%.2f, %.2f), substituted points: %s"
                            % (i, pt[0], pt[1], repr(v)))
     def _init_mesh_config(self, config):
@@ -738,28 +701,20 @@ class BedMeshCalibrate:
 
         if need_cfg_update:
             self._verify_algorithm(gcmd.error)
-<<<<<<< HEAD
             self.probe_mgr.generate_points(
                 self.mesh_config, self.mesh_min, self.mesh_max,
                 self.radius, self.origin, probe_method
             )
             gcmd.respond_info("Generating new points...")
             self.print_generated_points(gcmd.respond_info)
-=======
-            self._generate_points(gcmd.error, probe_method)
->>>>>>> eddy/eddy
             msg = "\n".join(["%s: %s" % (k, v)
                              for k, v in self.mesh_config.items()])
             logging.info("Updated Mesh Configuration:\n" + msg)
         else:
-<<<<<<< HEAD
             self.probe_mgr.generate_points(
                 self.mesh_config, self.mesh_min, self.mesh_max,
                 self.radius, self.origin, probe_method
             )
-=======
-            self._generate_points(gcmd.error, probe_method)
->>>>>>> eddy/eddy
     def dump_calibration(self, gcmd=None):
         if gcmd is not None and gcmd.get_command_parameters():
             self.update_config(gcmd)
@@ -769,17 +724,10 @@ class BedMeshCalibrate:
         cfg["origin"] = self.origin
         cfg["radius"] = self.radius
         return {
-<<<<<<< HEAD
             "points": self.probe_mgr.get_base_points(),
             "config": cfg,
             "probe_path": self.probe_mgr.get_std_path(),
             "rapid_path": list(self.probe_mgr.iter_rapid_path())
-=======
-            "points": self.points,
-            "config": cfg,
-            "probe_path": list(self.path_generator),
-            "rapid_path": list(self.path_generator.iter_rapid())
->>>>>>> eddy/eddy
         }
     cmd_BED_MESH_CALIBRATE_help = "Perform Mesh Bed Leveling"
     def cmd_BED_MESH_CALIBRATE(self, gcmd):
@@ -813,12 +761,8 @@ class BedMeshCalibrate:
         x_cnt = params['x_count']
         y_cnt = params['y_count']
 
-<<<<<<< HEAD
         substitutes = self.probe_mgr.get_substitutes()
         probed_pts = positions
-=======
-        substitutes = self.path_generator.get_substitutes()
->>>>>>> eddy/eddy
         if substitutes:
             # Replace substituted points with the original generated
             # point.  Its Z Value is the average probed Z of the
@@ -827,11 +771,7 @@ class BedMeshCalibrate:
             idx_offset = 0
             start_idx = 0
             for i, pts in substitutes.items():
-<<<<<<< HEAD
                 fpt = [p - o for p, o in zip(base_points[i], offsets[:2])]
-=======
-                fpt = [p - o for p, o in zip(self.points[i], offsets[:2])]
->>>>>>> eddy/eddy
                 # offset the index to account for additional samples
                 idx = i + idx_offset
                 # Add "normal" points
@@ -955,19 +895,13 @@ class BedMeshCalibrate:
             logging.info(
                 "  %-4d| %-17s| %-25s| %s" % (i, gen_pt, probed_pt, corr_pt))
 
-<<<<<<< HEAD
 class ProbeManager:
     def __init__(self, config, orig_config, finalize_cb):
         self.printer = config.get_printer()
-=======
-class PathGenerator:
-    def __init__(self, config, orig_config, zrp):
->>>>>>> eddy/eddy
         self.cfg_overshoot = config.getfloat("scan_overshoot", 0, minval=1.)
         self.orig_config = orig_config
         self.faulty_regions = []
         self.overshoot = self.cfg_overshoot
-<<<<<<< HEAD
         self.zero_ref_pos = config.getfloatlist(
             "zero_reference_position", None, count=2
         )
@@ -978,14 +912,11 @@ class PathGenerator:
         self.probe_helper = probe.ProbePointsHelper(config, finalize_cb, [])
         self.probe_helper.use_xy_offsets(True)
         self.rapid_scan_helper = RapidScanHelper(config, self, finalize_cb)
-=======
-        self.zero_ref_pt = zrp
         self.zref_mode = ZrefMode.DISABLED
         self.base_points = []
         self.substitutes = collections.OrderedDict()
         self.path_cache = []
         self.is_round = orig_config["radius"] is not None
->>>>>>> eddy/eddy
         self._init_faulty_regions(config)
 
     def _init_faulty_regions(self, config):
@@ -1026,7 +957,6 @@ class PathGenerator:
                                j+1, repr([prev_c1, prev_c3])))
             self.faulty_regions.append((c1, c3))
 
-<<<<<<< HEAD
     def start_probe(self, gcmd):
         method = gcmd.get("METHOD", "automatic").lower()
         can_scan = False
@@ -1105,29 +1035,13 @@ class PathGenerator:
         self.base_points = points
         self.substitutes.clear()
         # adjust overshoot
-=======
-    def get_substitutes(self):
-        return self.substitutes
-
-    def update(self, points, zref_mode, min_pt, max_pt, radius):
-        self.base_points = points
-        self.substitutes.clear()
-        self.zref_mode = zref_mode
-        self.path_cache = []
-        # adjust overshoot
-        min_x, max_x = min_pt[0], max_pt[0]
->>>>>>> eddy/eddy
         og_min_x = self.orig_config["mesh_min"][0]
         og_max_x = self.orig_config["mesh_max"][0]
         add_ovs = min(max(0, min_x - og_min_x), max(0, og_max_x - max_x))
         self.overshoot = self.cfg_overshoot + math.floor(add_ovs)
-<<<<<<< HEAD
         min_pt, max_pt = (min_x, min_y), (max_x, max_y)
         self._process_faulty_regions(min_pt, max_pt, radius)
         self.probe_helper.update_probe_points(self.get_std_path(), 3)
-=======
-        self._process_faulty_regions(min_pt, max_pt, radius)
->>>>>>> eddy/eddy
 
     def _process_faulty_regions(self, min_pt, max_pt, radius):
         if not self.faulty_regions:
@@ -1135,21 +1049,13 @@ class PathGenerator:
         # Cannot probe a reference within a faulty region
         if self.zref_mode == ZrefMode.PROBE:
             for min_c, max_c in self.faulty_regions:
-<<<<<<< HEAD
                 if within(self.zero_ref_pos, min_c, max_c):
-=======
-                if within(self.zero_ref_pt, min_c, max_c):
->>>>>>> eddy/eddy
                     opt = "zero_reference_position"
                     raise BedMeshError(
                         "bed_mesh: Cannot probe zero reference position at "
                         "(%.2f, %.2f) as it is located within a faulty region."
                         " Check the value for option '%s'"
-<<<<<<< HEAD
                         % (self.zero_ref_pos[0], self.zero_ref_pos[1], opt,)
-=======
-                        % (self.zero_ref_pt[0], self.zero_ref_pt[1], opt,)
->>>>>>> eddy/eddy
                     )
         # Check to see if any points fall within faulty regions
         last_y = self.base_points[0][1]
@@ -1191,7 +1097,6 @@ class PathGenerator:
                 )
             self.substitutes[i] = valid_coords
 
-<<<<<<< HEAD
     def get_base_points(self):
         return self.base_points
 
@@ -1208,34 +1113,6 @@ class PathGenerator:
         return path
 
     def iter_rapid_path(self):
-=======
-    def __getitem__(self, index):
-        # Keep compatibility with ProbePointsHelper standard probing
-        if not self.path_cache:
-            self.path_cache = list(self)
-        return self.path_cache[index]
-
-    def __len__(self):
-        if self.path_cache:
-            return len(self.path_cache)
-        path_len = len(self.base_points)
-        path_len += sum([len(pts) - 1 for pts in self.substitutes.values()])
-        if self.zref_mode == ZrefMode.PROBE:
-            path_len += 1
-        return path_len
-
-    def __iter__(self):
-        for idx, pt in enumerate(self.base_points):
-            if idx in self.substitutes:
-                for sub_pt in self.substitutes[idx]:
-                    yield sub_pt
-            else:
-                yield pt
-        if self.zref_mode == ZrefMode.PROBE:
-            yield self.zero_ref_pt
-
-    def iter_rapid(self):
->>>>>>> eddy/eddy
         ascnd_x = True
         last_base_pt = last_mv_pt = self.base_points[0]
         # Generate initial move point
@@ -1264,15 +1141,9 @@ class PathGenerator:
         if self.zref_mode == ZrefMode.PROBE:
             if self.overshoot:
                 ovs = min(4, self.overshoot)
-<<<<<<< HEAD
                 ovs = ovs if ascnd_x else -ovs
                 yield (last_mv_pt[0] + ovs, last_mv_pt[1]), False
             yield self.zero_ref_pos, True
-=======
-                ovs = overshoot if ascnd_x else -overshoot
-                yield (last_mv_pt[0] + ovs, last_mv_pt[1]), False
-            yield self.zero_ref_pt, True
->>>>>>> eddy/eddy
 
     def _gen_faulty_path(self, last_pt, idx, ascnd_x, dir_change):
         subs = self.substitutes[idx]
@@ -1393,7 +1264,6 @@ class PathGenerator:
             opp = math.sin(rad) * radius
             adj = math.cos(rad) * radius
             yield (origin[0] + adj, origin[1] + opp)
-<<<<<<< HEAD
 
 
 MAX_HIT_DIST = 2.
@@ -1477,8 +1347,6 @@ class RapidScanHelper:
     def _apply_offsets(self, point, offsets):
         return [(pos - ofs) for pos, ofs in zip(point, offsets)]
 
-=======
->>>>>>> eddy/eddy
 
 class MoveSplitter:
     def __init__(self, config, gcode):
