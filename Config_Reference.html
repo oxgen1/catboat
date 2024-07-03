@@ -4681,6 +4681,13 @@ toward the center of the print area.</p>
 #adaptive_margin:
 #   An optional margin (in mm) to be added around the bed area used by
 #   the defined print objects when generating an adaptive mesh.
+#scan_overshoot:
+#  The maximum amount of travel (in mm) available outside of the mesh.
+#  For rectangular beds this applies to travel on the X axis, and for round beds
+#  it applies to the entire radius.  The tool must be able to travel the amount
+#  specified outside of the mesh.  This value is used to optimize the travel
+#  path when performing a &quot;rapid scan&quot;.  The minimum value that may be specified
+#  is 1.  The default is no overshoot.
 </code></pre></div>
 
 <h3 id="bed_tilt">[bed_tilt]<a class="headerlink" href="#bed_tilt" title="Permanent link">&para;</a></h3>
@@ -5576,9 +5583,20 @@ z_offset:
 sensor_type: ldc1612
 #   The sensor chip used to perform eddy current measurements. This
 #   parameter must be provided and must be set to ldc1612.
+#intb_pin:
+#   MCU gpio pin connected to the ldc1612 sensor&#39;s INTB pin (if
+#   available). The default is to not use the INTB pin.
 #z_offset:
 #   The nominal distance (in mm) between the nozzle and bed that a
 #   probing attempt should stop at. This parameter must be provided.
+#tap_height:
+#   Specify this parameter to enable probing until a nozzle contact
+#   with bed is detected. The parameter here specifies the minimum
+#   distance between bed and nozzle (in mm, as detected by the probe)
+#   for the probe to enable &quot;tap&quot; mode. If this parameter is specified
+#   and the toolhead starts a probe request while above this height
+#   (as detected by the probe) then an error will be reported. The
+#   default is to not perform &quot;tap&quot; based probing.
 #i2c_address:
 #i2c_mcu:
 #i2c_bus:
@@ -6742,6 +6760,18 @@ run_current:
 #   set, &quot;stealthChop&quot; mode will be enabled if the stepper motor
 #   velocity is below this value. The default is 0, which disables
 #   &quot;stealthChop&quot; mode.
+#coolstep_threshold:
+#   The velocity (in mm/s) to set the TMC driver internal &quot;CoolStep&quot;
+#   threshold to. If set, the coolstep feature will be enabled when
+#   the stepper motor velocity is near or above this value. Important
+#   - if coolstep_threshold is set and &quot;sensorless homing&quot; is used,
+#   then one must ensure that the homing speed is above the coolstep
+#   threshold! The default is to not enable the coolstep feature.
+#high_velocity_threshold:
+#   The velocity (in mm/s) to set the TMC driver internal &quot;high
+#   velocity&quot; threshold (THIGH) to. This is typically used to disable
+#   the &quot;CoolStep&quot; feature at high speeds. The default is to not set a
+#   TMC &quot;high velocity&quot; threshold.
 #driver_MSLUT0: 2863314260
 #driver_MSLUT1: 1251300522
 #driver_MSLUT2: 608774441
@@ -6772,11 +6802,19 @@ run_current:
 #driver_TOFF: 4
 #driver_HEND: 7
 #driver_HSTRT: 0
+#driver_VHIGHFS: 0
+#driver_VHIGHCHM: 0
 #driver_PWM_AUTOSCALE: True
 #driver_PWM_FREQ: 1
 #driver_PWM_GRAD: 4
 #driver_PWM_AMPL: 128
 #driver_SGT: 0
+#driver_SEMIN: 0
+#driver_SEUP: 0
+#driver_SEMAX: 0
+#driver_SEDN: 0
+#driver_SEIMIN: 0
+#driver_SFILT: 0
 #   Set the given register during the configuration of the TMC2130
 #   chip. This may be used to set custom motor parameters. The
 #   defaults for each parameter are next to the parameter name in the
@@ -6867,6 +6905,13 @@ run_current:
 #sense_resistor: 0.110
 #stealthchop_threshold: 0
 #   See the &quot;tmc2208&quot; section for the definition of these parameters.
+#coolstep_threshold:
+#   The velocity (in mm/s) to set the TMC driver internal &quot;CoolStep&quot;
+#   threshold to. If set, the coolstep feature will be enabled when
+#   the stepper motor velocity is near or above this value. Important
+#   - if coolstep_threshold is set and &quot;sensorless homing&quot; is used,
+#   then one must ensure that the homing speed is above the coolstep
+#   threshold! The default is to not enable the coolstep feature.
 #uart_address:
 #   The address of the TMC2209 chip for UART messages (an integer
 #   between 0 and 3). This is typically used when multiple TMC2209
@@ -6886,6 +6931,11 @@ run_current:
 #driver_PWM_GRAD: 14
 #driver_PWM_OFS: 36
 #driver_SGTHRS: 0
+#driver_SEMIN: 0
+#driver_SEUP: 0
+#driver_SEMAX: 0
+#driver_SEDN: 0
+#driver_SEIMIN: 0
 #   Set the given register during the configuration of the TMC2209
 #   chip. This may be used to set custom motor parameters. The
 #   defaults for each parameter are next to the parameter name in the
@@ -7014,6 +7064,18 @@ run_current:
 #   set, &quot;stealthChop&quot; mode will be enabled if the stepper motor
 #   velocity is below this value. The default is 0, which disables
 #   &quot;stealthChop&quot; mode.
+#coolstep_threshold:
+#   The velocity (in mm/s) to set the TMC driver internal &quot;CoolStep&quot;
+#   threshold to. If set, the coolstep feature will be enabled when
+#   the stepper motor velocity is near or above this value. Important
+#   - if coolstep_threshold is set and &quot;sensorless homing&quot; is used,
+#   then one must ensure that the homing speed is above the coolstep
+#   threshold! The default is to not enable the coolstep feature.
+#high_velocity_threshold:
+#   The velocity (in mm/s) to set the TMC driver internal &quot;high
+#   velocity&quot; threshold (THIGH) to. This is typically used to disable
+#   the &quot;CoolStep&quot; feature at high speeds. The default is to not set a
+#   TMC &quot;high velocity&quot; threshold.
 #driver_MSLUT0: 2863314260
 #driver_MSLUT1: 1251300522
 #driver_MSLUT2: 608774441
@@ -7132,6 +7194,18 @@ run_current:
 #   set, &quot;stealthChop&quot; mode will be enabled if the stepper motor
 #   velocity is below this value. The default is 0, which disables
 #   &quot;stealthChop&quot; mode.
+#coolstep_threshold:
+#   The velocity (in mm/s) to set the TMC driver internal &quot;CoolStep&quot;
+#   threshold to. If set, the coolstep feature will be enabled when
+#   the stepper motor velocity is near or above this value. Important
+#   - if coolstep_threshold is set and &quot;sensorless homing&quot; is used,
+#   then one must ensure that the homing speed is above the coolstep
+#   threshold! The default is to not enable the coolstep feature.
+#high_velocity_threshold:
+#   The velocity (in mm/s) to set the TMC driver internal &quot;high
+#   velocity&quot; threshold (THIGH) to. This is typically used to disable
+#   the &quot;CoolStep&quot; feature at high speeds. The default is to not set a
+#   TMC &quot;high velocity&quot; threshold.
 #driver_MSLUT0: 2863314260
 #driver_MSLUT1: 1251300522
 #driver_MSLUT2: 608774441
